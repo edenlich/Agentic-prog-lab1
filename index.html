@@ -167,9 +167,171 @@
     .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
     .then(topo => globe.add(buildLandDots(buildLandMask(topo))))
     .catch(err => { console.warn('Land data unavailable, using wireframe:', err); globe.add(buildWireframe()); })
-    .finally(() => document.getElementById('loading').classList.add('done'));
+    .finally(() => {
+      const el = document.getElementById('loading');
+      el.classList.add('done');
+      setTimeout(() => el.remove(), 900);
+    });
+
+  // ---------- CITIES ----------
+  const CITIES = [
+    { name: 'Tel Aviv', lat: 32.08, lon: 34.78 },
+    { name: 'New York', lat: 40.71, lon: -74.01 },
+    { name: 'London', lat: 51.51, lon: -0.13 },
+    { name: 'Tokyo', lat: 35.68, lon: 139.69 },
+    { name: 'Sydney', lat: -33.87, lon: 151.21 },
+    { name: 'São Paulo', lat: -23.55, lon: -46.63 },
+    { name: 'Cape Town', lat: -33.92, lon: 18.42 },
+    { name: 'Paris', lat: 48.86, lon: 2.35 },
+    { name: 'Dubai', lat: 25.20, lon: 55.27 },
+    { name: 'Singapore', lat: 1.35, lon: 103.82 },
+    { name: 'Los Angeles', lat: 34.05, lon: -118.24 },
+    { name: 'Moscow', lat: 55.76, lon: 37.62 },
+    { name: 'Mumbai', lat: 19.08, lon: 72.88 },
+    { name: 'Hong Kong', lat: 22.32, lon: 114.17 },
+    { name: 'Reykjavik', lat: 64.15, lon: -21.94 },
+    { name: 'Nairobi', lat: -1.29, lon: 36.82 },
+    { name: 'Mexico City', lat: 19.43, lon: -99.13 },
+    { name: 'Toronto', lat: 43.65, lon: -79.38 },
+    { name: 'Buenos Aires', lat: -34.60, lon: -58.38 },
+    { name: 'Seoul', lat: 37.57, lon: 126.98 },
+  ];
+  for (const c of CITIES) c.pos = latLonToVec3(c.lat, c.lon);
+
+  // ---------- FLIGHTS ----------
+  const COLORS = [0x3ff2ff, 0x3ff2ff, 0xff3fd2, 0xffb43f].map(c => new THREE.Color(c));
+  const TRAIL = 0.28;           // trail length as a fraction of the arc
+  const MAX_ACTIVE = MOBILE ? 18 : 32;
+  const SPAWN_EVERY = 0.28;     // seconds
+  const DOT_TEX = dotTexture();
+
+  const arcVertex = `
+    varying float vT;
+    void main() {
+      vT = uv.x;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`;
+  const arcFragment = `
+    uniform float uProgress;
+    uniform float uFade;
+    uniform vec3 uColor;
+    varying float vT;
+    void main() {
+      float d = uProgress - vT;
+      if (d < 0.0) discard;
+      float trail = pow(clamp(1.0 - d / ${TRAIL.toFixed(2)}, 0.0, 1.0), 2.0);
+      float alpha = max(trail, 0.07) * uFade;
+      vec3 col = uColor * (1.0 + 1.5 * trail * trail);
+      gl_FragColor = vec4(col, alpha);
+    }`;
+
+  const flights = [];
+  const rings = [];
+  const stats = { launched: 0 };
+
+  function arcCurve(a, b) {
+    const ua = a.clone().normalize(), ub = b.clone().normalize();
+    const angle = ua.angleTo(ub);
+    const height = 4 + angle * 15;
+    const q = new THREE.Quaternion();
+    const qa = new THREE.Quaternion(), qb = new THREE.Quaternion().setFromUnitVectors(ua, ub);
+    const pts = [];
+    for (let i = 0; i <= 48; i++) {
+      const t = i / 48;
+      q.slerpQuaternions(qa, qb, t);
+      pts.push(ua.clone().applyQuaternion(q).multiplyScalar(R + 0.5 + Math.sin(Math.PI * t) * height));
+    }
+    return { curve: new THREE.CatmullRomCurve3(pts), angle };
+  }
+
+  function launchFlight(from, to) {
+    if (!to) {
+      do { to = CITIES[Math.floor(Math.random() * CITIES.length)]; } while (to === from);
+    }
+    const { curve, angle } = arcCurve(from.pos, to.pos);
+    const color = COLORS[Math.floor(Math.random() * COLORS.length)];
+    const material = new THREE.ShaderMaterial({
+      vertexShader: arcVertex,
+      fragmentShader: arcFragment,
+      uniforms: { uProgress: { value: 0 }, uFade: { value: 1 }, uColor: { value: color } },
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 80, MOBILE ? 0.45 : 0.35, 6, false), material);
+    const head = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: DOT_TEX, color, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    }));
+    head.scale.setScalar(5);
+    globe.add(tube, head);
+    flights.push({ tube, head, curve, to, color, t: 0, duration: 1.6 + angle * 1.4, landed: false, fade: 1 });
+    stats.launched++;
+  }
+
+  function spawnRing(city, color, scale = 1) {
+    const normal = city.pos.clone().normalize();
+    const mesh = new THREE.Mesh(
+      new THREE.RingGeometry(0.85, 1.15, 48),
+      new THREE.MeshBasicMaterial({ color, transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending })
+    );
+    mesh.position.copy(normal).multiplyScalar(R + 0.6);
+    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+    globe.add(mesh);
+    rings.push({ mesh, age: 0, life: 1.4, maxScale: 7 * scale });
+  }
+
+  function disposeObj(o) {
+    globe.remove(o);
+    o.geometry?.dispose();
+    o.material.dispose();
+  }
+
+  function updateFlights(dt) {
+    for (let i = flights.length - 1; i >= 0; i--) {
+      const f = flights[i];
+      f.t += dt / f.duration;
+      const p = f.t;
+      f.tube.material.uniforms.uProgress.value = p;
+      if (p < 1) {
+        f.head.position.copy(f.curve.getPointAt(p));
+      } else if (!f.landed) {
+        f.landed = true;
+        f.head.visible = false;
+        spawnRing(f.to, f.color);
+      }
+      if (p > 1 + TRAIL) {
+        f.fade -= dt * 1.5;
+        f.tube.material.uniforms.uFade.value = Math.max(f.fade, 0);
+        if (f.fade <= 0) {
+          disposeObj(f.tube);
+          disposeObj(f.head);
+          flights.splice(i, 1);
+        }
+      }
+    }
+    for (let i = rings.length - 1; i >= 0; i--) {
+      const r = rings[i];
+      r.age += dt;
+      const k = r.age / r.life;
+      r.mesh.scale.setScalar(1 + k * r.maxScale);
+      r.mesh.material.opacity = 1 - k;
+      if (k >= 1) { disposeObj(r.mesh); rings.splice(i, 1); }
+    }
+  }
+
+  let spawnTimer = 0;
+  function autoSpawn(dt) {
+    spawnTimer += dt;
+    if (spawnTimer < SPAWN_EVERY) return;
+    spawnTimer = 0;
+    if (flights.length < MAX_ACTIVE) launchFlight(CITIES[Math.floor(Math.random() * CITIES.length)]);
+  }
 
   // ---------- LOOP ----------
+  // Pre-warm so the globe opens with flights already in the air.
+  for (let i = 0; i < 150; i++) { autoSpawn(1 / 30); updateFlights(1 / 30); }
+
+  const clock = new THREE.Clock();
   addEventListener('resize', () => {
     camera.aspect = innerWidth / innerHeight;
     camera.updateProjectionMatrix();
@@ -177,6 +339,9 @@
   });
 
   renderer.setAnimationLoop(() => {
+    const dt = Math.min(clock.getDelta(), 0.1);
+    autoSpawn(dt);
+    updateFlights(dt);
     controls.update();
     renderer.render(scene, camera);
   });
