@@ -433,7 +433,7 @@
   // ---------- FLIGHTS ----------
   const COLORS = [0x3ff2ff, 0x3ff2ff, 0xff3fd2, 0xffb43f].map(c => new THREE.Color(c));
   const TRAIL = 0.28;           // trail length as a fraction of the arc
-  const MAX_ACTIVE = MOBILE ? 18 : 32;
+  const MAX_ACTIVE = 15;          // max flights in the air at once (CHAOS MODE ignores it)
   const SPAWN_EVERY = 0.28;     // seconds
 
   const arcVertex = `
