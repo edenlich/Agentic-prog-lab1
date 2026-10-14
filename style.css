@@ -116,8 +116,6 @@ h1 {
 
 .stat { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; margin: 2px 0; }
 .stat .label { font-size: 0.7rem; letter-spacing: 0.18em; opacity: 0.7; }
-#origin { font-size: 0.8rem; }
-#origin.locked { color: var(--magenta); text-shadow: 0 0 8px var(--magenta); }
 
 #log {
   list-style: none;
@@ -192,7 +190,6 @@ body.chaos .frame i { border-color: var(--magenta); }
   opacity: 0;
   will-change: transform;
 }
-.city-label.selected { color: var(--magenta); text-shadow: 0 0 8px var(--magenta); font-size: 0.75rem; }
 
 @media (max-width: 640px) {
   .top-left { top: 18px; left: 18px; right: 18px; }

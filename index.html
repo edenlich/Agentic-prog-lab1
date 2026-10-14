@@ -38,7 +38,6 @@
     <div class="panel bottom-left">
       <div class="stat"><span class="label">ACTIVE FLIGHTS</span><span id="active" class="big">0</span></div>
       <div class="stat"><span class="label">TOTAL LAUNCHED</span><span id="total">0</span></div>
-      <div class="stat"><span class="label">ORIGIN LOCK</span><span id="origin">— NONE —</span></div>
       <ul id="log"></ul>
     </div>
 
@@ -49,7 +48,7 @@
         <output id="speed-val">1.00×</output>
       </label>
       <button id="chaos" type="button">⚠ CHAOS MODE</button>
-      <div class="hint">DRAG · ZOOM · TAP A CITY</div>
+      <div class="hint">DRAG · ZOOM · TAP A FLIGHT</div>
     </div>
 
     <div id="banner"></div>
@@ -415,8 +414,6 @@
   ];
 
   const labelsEl = document.getElementById('labels');
-  const hitboxes = [];
-  const hitGeo = new THREE.SphereGeometry(5, 8, 8);
   const hitMat = new THREE.MeshBasicMaterial({ visible: false });
   for (const c of CITIES) {
     c.pos = latLonToVec3(c.lat, c.lon);
@@ -427,12 +424,6 @@
     c.marker.scale.setScalar(3);
     globe.add(c.marker);
 
-    const hit = new THREE.Mesh(hitGeo, hitMat);
-    hit.position.copy(latLonToVec3(c.lat, c.lon, R + 2));
-    hit.userData.city = c;
-    globe.add(hit);
-    hitboxes.push(hit);
-
     c.label = document.createElement('div');
     c.label.className = 'city-label';
     c.label.textContent = c.name.toUpperCase();
@@ -441,7 +432,6 @@
 
   // ---------- FLIGHTS ----------
   const COLORS = [0x3ff2ff, 0x3ff2ff, 0xff3fd2, 0xffb43f].map(c => new THREE.Color(c));
-  const SELECT_COLOR = new THREE.Color(0xff3fd2);
   const TRAIL = 0.28;           // trail length as a fraction of the arc
   const MAX_ACTIVE = MOBILE ? 18 : 32;
   const SPAWN_EVERY = 0.28;     // seconds
@@ -477,10 +467,9 @@
   const flights = [];
   const rings = [];
   const stats = { launched: 0 };
-  let selected = null;
   let pulse = 0;
-  const FLIGHT_TIME = 3;          // base flight duration multiplier (3x slower than the original)
-  const TRACK_TIME_SCALE = 0.5;   // the followed flight runs at half speed
+  const FLIGHT_TIME = 8;          // base flight duration multiplier (8x slower than the original)
+  const TRACK_TIME_SCALE = 1;     // the followed flight keeps its normal speed
   let simSpeed = 1;               // live multiplier from the HUD slider (0.25x - 5x)
   const tracking = { flight: null, mode: "free" };  // mode: free | follow | return
 
@@ -635,13 +624,12 @@
     if (spawnTimer < SPAWN_EVERY) return;
     spawnTimer = 0;
     if (flights.length >= MAX_ACTIVE) return;
-    if (selected && Math.random() < 0.4) launchFlight(selected, undefined, SELECT_COLOR);
-    else launchFlight(randomCity());
+    launchFlight(randomCity());
   }
 
   // ---------- HUD ----------
   const $ = id => document.getElementById(id);
-  const hud = { active: $('active'), total: $('total'), origin: $('origin'), clock: $('clock'), date: $('date'), log: $('log'), banner: $('banner') };
+  const hud = { active: $('active'), total: $('total'), clock: $('clock'), date: $('date'), log: $('log'), banner: $('banner') };
   const hex = c => '#' + c.getHexString();
 
   function logFlight(from, to, color) {
@@ -688,18 +676,6 @@
       c.label.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`;
       c.label.style.opacity = Math.min(1, (facing - 0.25) * 3).toFixed(2);
     }
-  }
-
-  // ---------- INTERACTION ----------
-  function selectCity(city) {
-    if (selected) { selected.marker.material.color.set(0xffffff); selected.label.classList.remove('selected'); }
-    selected = city;
-    city.marker.material.color.copy(SELECT_COLOR);
-    city.label.classList.add('selected');
-    hud.origin.textContent = `${city.code} · ${city.name.toUpperCase()}`;
-    hud.origin.classList.add('locked');
-    spawnRing(city, SELECT_COLOR, 2);
-    for (let i = 0; i < 8; i++) setTimeout(() => launchFlight(city, undefined, i % 2 ? SELECT_COLOR : COLORS[0]), i * 110);
   }
 
   // ---------- FLIGHT TRACKING ----------
@@ -819,13 +795,13 @@
   function pick(clientX, clientY) {
     pointer.set(clientX / innerWidth * 2 - 1, -(clientY / innerHeight) * 2 + 1);
     raycaster.setFromCamera(pointer, camera);
-    const targets = [earth, ...hitboxes];
+    const targets = [earth];
     for (const f of flights) if (!f.landed) targets.push(f.hit);
     const hits = raycaster.intersectObjects(targets, false);
-    // Prefer a flight over a city when both are under the pointer.
+    // Ignore anything hidden behind the globe.
     const front = hits.findIndex(h => h.object === earth);
     const visible = front === -1 ? hits : hits.slice(0, front);
-    return visible.find(h => h.object.userData.flight) || visible.find(h => h.object.userData.city) || null;
+    return visible.find(h => h.object.userData.flight) || null;
   }
 
   let downX = 0, downY = 0;
@@ -834,7 +810,6 @@
     if (Math.hypot(e.clientX - downX, e.clientY - downY) > 6) return;  // it was a drag
     const hit = pick(e.clientX, e.clientY);
     if (hit?.object.userData.flight) openTracking(hit.object.userData.flight);
-    else if (hit?.object.userData.city) { closeTracking(); selectCity(hit.object.userData.city); }
     else closeTracking();
   });
 
@@ -869,7 +844,7 @@
 
   // ---------- LOOP ----------
   // Pre-warm so the globe opens with flights already in the air.
-  for (let i = 0; i < 450; i++) { autoSpawn(1 / 30); updateFlights(1 / 30); }
+  for (let i = 0; i < 1200; i++) { autoSpawn(1 / 30); updateFlights(1 / 30); }
 
   const clock = new THREE.Clock();
   addEventListener('resize', () => {
@@ -884,7 +859,6 @@
     pulse += dt;
     autoSpawn(dt);
     updateFlights(dt);
-    if (selected) selected.marker.scale.setScalar(4 + Math.sin(pulse * 6) * 1.5);
     stars.rotation.y += dt * 0.005;
     if (!updateCamera(dt)) controls.update();
     updateHover();
