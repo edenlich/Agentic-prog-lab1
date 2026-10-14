@@ -33,6 +33,7 @@
     <div class="panel top-right">
       <div id="clock" class="big">--:--:--</div>
       <div id="date" class="sub">UTC</div>
+      <div id="sun" class="sub">SUN --</div>
     </div>
 
     <div class="panel bottom-left">
@@ -98,6 +99,7 @@
   const TEX_BASE = 'https://cdn.jsdelivr.net/npm/three-globe@2.31.0/example/img/';
   const EARTH_DAY_URL = TEX_BASE + 'earth-blue-marble.jpg';
   const EARTH_WATER_URL = TEX_BASE + 'earth-water.png';
+  const EARTH_NIGHT_URL = TEX_BASE + 'earth-night.jpg';
   const IDLE_RESUME_MS = 4000;
 
   function latLonToVec3(lat, lon, r = R) {
@@ -183,25 +185,34 @@
   scene.add(stars);
 
   // ---------- GLOBE ----------
-  // Earth: blue-marble texture with graded oceans, soft lighting and a blue rim.
+  // Earth: blue-marble texture with graded oceans, lit by the real sun position,
+  // with city lights on the night side and a soft twilight band at the terminator.
   // Until the texture arrives (or if it fails) it renders as a dark core, which
   // also hides dots and arcs on the far side.
   const earthUniforms = {
     uDay: { value: null },
     uWater: { value: null },
+    uNight: { value: null },
+    uHasNight: { value: 0 },
     uLoaded: { value: 0 },
+    uSunDir: { value: new THREE.Vector3(1, 0, 0) },
   };
   const earth = new THREE.Mesh(
     new THREE.SphereGeometry(R, 96, 96),
     new THREE.ShaderMaterial({
       uniforms: earthUniforms,
       vertexShader: `
+        uniform vec3 uSunDir;
         varying vec3 vNormal;
+        varying vec3 vWorldNormal;
+        varying vec3 vSunView;
         varying vec3 vViewPos;
         varying vec2 vUv;
         void main() {
           vUv = uv;
           vNormal = normalize(normalMatrix * normal);
+          vWorldNormal = normalize(mat3(modelMatrix) * normal);
+          vSunView = normalize((viewMatrix * vec4(uSunDir, 0.0)).xyz);
           vec4 mv = modelViewMatrix * vec4(position, 1.0);
           vViewPos = mv.xyz;
           gl_Position = projectionMatrix * mv;
@@ -209,8 +220,13 @@
       fragmentShader: `
         uniform sampler2D uDay;
         uniform sampler2D uWater;
+        uniform sampler2D uNight;
+        uniform float uHasNight;
         uniform float uLoaded;
+        uniform vec3 uSunDir;
         varying vec3 vNormal;
+        varying vec3 vWorldNormal;
+        varying vec3 vSunView;
         varying vec3 vViewPos;
         varying vec2 vUv;
         void main() {
@@ -232,15 +248,28 @@
           vec3 land = pow(day, vec3(0.9)) * vec3(1.05, 1.1, 0.95);
           vec3 col = mix(land, ocean, water);
 
-          // Light from the upper left (fixed to the camera) so the globe reads round.
-          vec3 L = normalize(vec3(-0.6, 0.45, 0.65));
-          float diff = max(dot(n, L), 0.0);
-          col *= 0.14 + 1.1 * diff;
+          // Real sun: cosine of the sun's elevation at this point.
+          float sunDot = dot(normalize(vWorldNormal), uSunDir);
+          float dayAmt = smoothstep(-0.1, 0.12, sunDot);   // soft civil-twilight band
+          vec3 dayCol = col * (0.3 + 0.95 * max(sunDot, 0.0));
           // Sun glint on water.
-          vec3 H = normalize(L + viewDir);
-          col += vec3(0.35, 0.5, 0.65) * pow(max(dot(n, H), 0.0), 220.0) * water * 0.15;
-          // Atmospheric blue haze toward the edge.
-          col = mix(col, vec3(0.15, 0.5, 1.0), pow(rim, 1.4) * 0.45);
+          vec3 H = normalize(vSunView + viewDir);
+          dayCol += vec3(0.35, 0.5, 0.65) * pow(max(dot(n, H), 0.0), 220.0) * water * 0.15;
+
+          // Night: a faint moonlit Earth plus warm city lights.
+          vec3 nightCol = col * 0.012 + vec3(0.0, 0.001, 0.004);
+          if (uHasNight > 0.5) {
+            // The night image has a blue moonlit base; city lights are its warm pixels.
+            vec3 lights = texture2D(uNight, vUv).rgb;
+            float glow = smoothstep(0.0, 0.12, lights.r - 0.6 * lights.b);
+            nightCol += vec3(1.0, 0.72, 0.4) * glow * 1.6;
+          }
+          col = mix(nightCol, dayCol, dayAmt);
+
+          // Warm glow along the terminator (sunrise / sunset).
+          col += vec3(1.0, 0.45, 0.15) * exp(-pow((sunDot + 0.02) / 0.05, 2.0)) * 0.04;
+          // Atmospheric blue haze toward the edge, weaker on the night side.
+          col = mix(col, vec3(0.15, 0.5, 1.0), pow(rim, 1.4) * 0.45 * mix(0.12, 1.0, dayAmt));
           gl_FragColor = vec4(col, 1.0);
         }`,
     })
@@ -374,6 +403,15 @@
 
   const texLoader = new THREE.TextureLoader().setCrossOrigin('anonymous');
   const loadTex = url => new Promise((resolve, reject) => texLoader.load(url, resolve, undefined, reject));
+  // City lights load separately: if they fail, the night side is just dark.
+  loadTex(EARTH_NIGHT_URL)
+    .then(night => {
+      night.colorSpace = THREE.SRGBColorSpace;
+      earthUniforms.uNight.value = night;
+      earthUniforms.uHasNight.value = 1;
+    })
+    .catch(err => console.warn("City lights texture unavailable:", err));
+
   Promise.all([loadTex(EARTH_DAY_URL), loadTex(EARTH_WATER_URL)])
     .then(([day, water]) => {
       day.colorSpace = THREE.SRGBColorSpace;
@@ -650,8 +688,34 @@
   const pad = n => String(n).padStart(2, '0');
   function updateClock() {
     const d = new Date();
-    hud.clock.textContent = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
-    hud.date.textContent = `${d.getUTCFullYear()}.${pad(d.getUTCMonth() + 1)}.${pad(d.getUTCDate())} // UTC`;
+    // Viewer's real local time; the sun position below uses the same instant.
+    hud.clock.textContent = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    const off = -d.getTimezoneOffset();
+    const tz = `UTC${off >= 0 ? '+' : '−'}${pad(Math.floor(Math.abs(off) / 60))}:${pad(Math.abs(off) % 60)}`;
+    hud.date.textContent = `${d.getFullYear()}.${pad(d.getMonth() + 1)}.${pad(d.getDate())} // ${tz}`;
+    updateSun(d);
+  }
+
+  // Subsolar point from the real UTC time (low-precision solar ephemeris, ~0.1° accuracy).
+  function subsolarPoint(date) {
+    const rad = Math.PI / 180;
+    const n = (date.getTime() - Date.UTC(2000, 0, 1, 12)) / 86400000;   // days since J2000
+    const L = 280.460 + 0.9856474 * n;
+    const g = (357.528 + 0.9856003 * n) * rad;
+    const lambda = (L + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g)) * rad;
+    const eps = (23.439 - 0.0000004 * n) * rad;
+    const decl = Math.asin(Math.sin(eps) * Math.sin(lambda));
+    const ra = Math.atan2(Math.cos(eps) * Math.sin(lambda), Math.cos(lambda));
+    const gmst = 280.46061837 + 360.98564736629 * n;
+    const lon = ((ra / rad - gmst) % 360 + 540) % 360 - 180;
+    return { lat: decl / rad, lon };
+  }
+
+  const sunEl = $('sun');
+  function updateSun(date) {
+    const { lat, lon } = subsolarPoint(date);
+    earthUniforms.uSunDir.value.copy(latLonToVec3(lat, lon, 1));
+    sunEl.textContent = `SUN ☀ ${Math.abs(lat).toFixed(1)}°${lat >= 0 ? 'N' : 'S'} ${Math.abs(lon).toFixed(1)}°${lon >= 0 ? 'E' : 'W'}`;
   }
   updateClock();
   setInterval(updateClock, 1000);
