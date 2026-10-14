@@ -20,18 +20,53 @@
 </head>
 <body>
   <canvas id="scene"></canvas>
+  <div id="labels"></div>
+
+  <div id="hud">
+    <div class="frame"><i></i><i></i><i></i><i></i></div>
+
+    <header class="panel top-left">
+      <h1>GLOBAL FLIGHT GRID</h1>
+      <div class="sub"><span class="live-dot"></span>LIVE // AIR TRAFFIC SIMULATION</div>
+    </header>
+
+    <div class="panel top-right">
+      <div id="clock" class="big">--:--:--</div>
+      <div id="date" class="sub">UTC</div>
+    </div>
+
+    <div class="panel bottom-left">
+      <div class="stat"><span class="label">ACTIVE FLIGHTS</span><span id="active" class="big">0</span></div>
+      <div class="stat"><span class="label">TOTAL LAUNCHED</span><span id="total">0</span></div>
+      <div class="stat"><span class="label">ORIGIN LOCK</span><span id="origin">— NONE —</span></div>
+      <ul id="log"></ul>
+    </div>
+
+    <div class="bottom-right">
+      <button id="chaos" type="button">⚠ CHAOS MODE</button>
+      <div class="hint">DRAG · ZOOM · TAP A CITY</div>
+    </div>
+
+    <div id="banner"></div>
+  </div>
+
   <div id="loading">INITIALIZING GRID…</div>
 
   <script type="module">
   import * as THREE from 'three';
   import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+  import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+  import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+  import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+  import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
   import * as topojson from 'topojson-client';
 
   // ---------- CONFIG ----------
-  const MOBILE = Math.min(innerWidth, innerHeight) < 768;
+  const MOBILE = innerWidth < 768 || matchMedia('(pointer: coarse)').matches;
   const R = 100;
   const DOT_COUNT = MOBILE ? 22000 : 40000;
   const LAND_URL = 'https://cdn.jsdelivr.net/npm/world-atlas@2/land-110m.json';
+  const IDLE_RESUME_MS = 4000;
 
   function latLonToVec3(lat, lon, r = R) {
     const phi = (90 - lat) * Math.PI / 180;
@@ -42,35 +77,6 @@
        r * Math.sin(phi) * Math.sin(theta)
     );
   }
-
-  // ---------- SCENE ----------
-  const canvas = document.getElementById('scene');
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-  renderer.setSize(innerWidth, innerHeight);
-
-  const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 1, 5000);
-  camera.position.set(0, 60, MOBILE ? 420 : 320);
-
-  const controls = new OrbitControls(camera, canvas);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.06;
-  controls.enablePan = false;
-  controls.minDistance = 160;
-  controls.maxDistance = 700;
-  controls.autoRotate = true;
-  controls.autoRotateSpeed = 0.6;
-
-  const globe = new THREE.Group();
-  scene.add(globe);
-
-  // ---------- GLOBE ----------
-  // Dark core sphere hides the dots on the far side.
-  globe.add(new THREE.Mesh(
-    new THREE.SphereGeometry(R, 64, 64),
-    new THREE.MeshBasicMaterial({ color: 0x030c1c })
-  ));
 
   function dotTexture() {
     const c = document.createElement('canvas');
@@ -84,6 +90,124 @@
     g.fillRect(0, 0, 64, 64);
     return new THREE.CanvasTexture(c);
   }
+  const DOT_TEX = dotTexture();
+
+  // ---------- SCENE ----------
+  const canvas = document.getElementById('scene');
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, MOBILE ? 1.5 : 2));
+  renderer.setSize(innerWidth, innerHeight);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x01030a);
+  const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 1, 5000);
+  const fitDistance = () => 360 / Math.min(1, Math.pow(innerWidth / innerHeight, 0.85));
+  camera.position.set(0, 0.18, 1).normalize().multiplyScalar(fitDistance());
+
+  const controls = new OrbitControls(camera, canvas);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.06;
+  controls.enablePan = false;
+  controls.minDistance = 160;
+  controls.maxDistance = 900;
+  controls.autoRotate = true;
+  controls.autoRotateSpeed = 0.6;
+
+  let idleTimer;
+  controls.addEventListener('start', () => { controls.autoRotate = false; clearTimeout(idleTimer); });
+  controls.addEventListener('end', () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => { controls.autoRotate = true; }, IDLE_RESUME_MS);
+  });
+
+  const composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(scene, camera));
+  const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), MOBILE ? 0.6 : 0.8, 0.5, 0.15);
+  composer.addPass(bloom);
+  composer.addPass(new OutputPass());
+
+  const globe = new THREE.Group();
+  scene.add(globe);
+
+  // ---------- STARS ----------
+  const stars = (() => {
+    const n = MOBILE ? 1500 : 3500;
+    const pos = new Float32Array(n * 3), col = new Float32Array(n * 3);
+    const v = new THREE.Vector3(), c = new THREE.Color();
+    for (let i = 0; i < n; i++) {
+      v.randomDirection().multiplyScalar(1200 + Math.random() * 1500);
+      pos.set([v.x, v.y, v.z], i * 3);
+      c.setHSL(0.55 + Math.random() * 0.1, 0.6, 0.35 + Math.random() * 0.5);
+      col.set([c.r, c.g, c.b], i * 3);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    return new THREE.Points(geo, new THREE.PointsMaterial({
+      size: 2, sizeAttenuation: false, map: DOT_TEX, vertexColors: true,
+      transparent: true, depthWrite: false, opacity: 0.8,
+    }));
+  })();
+  scene.add(stars);
+
+  // ---------- GLOBE ----------
+  // Dark core with a fresnel rim; it also hides dots and arcs on the far side.
+  globe.add(new THREE.Mesh(
+    new THREE.SphereGeometry(R, 64, 64),
+    new THREE.ShaderMaterial({
+      vertexShader: `
+        varying vec3 vNormal;
+        void main() {
+          vNormal = normalize(normalMatrix * normal);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      fragmentShader: `
+        varying vec3 vNormal;
+        void main() {
+          float rim = pow(1.0 - max(dot(vNormal, vec3(0.0, 0.0, 1.0)), 0.0), 3.0);
+          gl_FragColor = vec4(vec3(0.008, 0.03, 0.07) + vec3(0.08, 0.45, 0.75) * rim * 0.3, 1.0);
+        }`,
+    })
+  ));
+
+  // Atmosphere halo
+  globe.add(new THREE.Mesh(
+    new THREE.SphereGeometry(R * 1.14, 64, 64),
+    new THREE.ShaderMaterial({
+      vertexShader: `
+        varying vec3 vNormal;
+        void main() {
+          vNormal = normalize(normalMatrix * normal);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      fragmentShader: `
+        varying vec3 vNormal;
+        void main() {
+          float i = pow(0.68 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 4.0);
+          gl_FragColor = vec4(0.2, 0.75, 1.0, 1.0) * i * 0.75;
+        }`,
+      side: THREE.BackSide,
+      blending: THREE.AdditiveBlending,
+      transparent: true,
+      depthWrite: false,
+    })
+  ));
+
+  // Faint lat/long graticule
+  globe.add((() => {
+    const pts = [];
+    const r = R + 0.15;
+    for (let lat = -75; lat <= 75; lat += 15)
+      for (let lon = -180; lon < 180; lon += 4)
+        pts.push(latLonToVec3(lat, lon, r), latLonToVec3(lat, lon + 4, r));
+    for (let lon = -180; lon < 180; lon += 15)
+      for (let lat = -88; lat < 88; lat += 4)
+        pts.push(latLonToVec3(lat, lon, r), latLonToVec3(Math.min(lat + 4, 88), lon, r));
+    return new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color: 0x3ff2ff, transparent: true, opacity: 0.07, depthWrite: false })
+    );
+  })());
 
   function buildLandMask(topo) {
     const W = 1024, H = 512;
@@ -139,7 +263,7 @@
     for (let i = 0; i < DOT_COUNT; i++) {
       const y = 1 - 2 * (i + 0.5) / DOT_COUNT;
       const lat = Math.asin(y) * 180 / Math.PI;
-      let lon = ((i * golden) * 180 / Math.PI) % 360 - 180;
+      const lon = ((i * golden) * 180 / Math.PI) % 360 - 180;
       if (!isLand(lat, lon)) continue;
       const v = latLonToVec3(lat, lon, R + 0.4);
       positions.push(v.x, v.y, v.z);
@@ -148,9 +272,10 @@
     geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     return new THREE.Points(geo, new THREE.PointsMaterial({
       size: MOBILE ? 1.6 : 1.3,
-      map: dotTexture(),
-      color: 0x3ff2ff,
+      map: DOT_TEX,
+      color: 0x2fd8ff,
       transparent: true,
+      opacity: 0.85,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     }));
@@ -175,35 +300,59 @@
 
   // ---------- CITIES ----------
   const CITIES = [
-    { name: 'Tel Aviv', lat: 32.08, lon: 34.78 },
-    { name: 'New York', lat: 40.71, lon: -74.01 },
-    { name: 'London', lat: 51.51, lon: -0.13 },
-    { name: 'Tokyo', lat: 35.68, lon: 139.69 },
-    { name: 'Sydney', lat: -33.87, lon: 151.21 },
-    { name: 'São Paulo', lat: -23.55, lon: -46.63 },
-    { name: 'Cape Town', lat: -33.92, lon: 18.42 },
-    { name: 'Paris', lat: 48.86, lon: 2.35 },
-    { name: 'Dubai', lat: 25.20, lon: 55.27 },
-    { name: 'Singapore', lat: 1.35, lon: 103.82 },
-    { name: 'Los Angeles', lat: 34.05, lon: -118.24 },
-    { name: 'Moscow', lat: 55.76, lon: 37.62 },
-    { name: 'Mumbai', lat: 19.08, lon: 72.88 },
-    { name: 'Hong Kong', lat: 22.32, lon: 114.17 },
-    { name: 'Reykjavik', lat: 64.15, lon: -21.94 },
-    { name: 'Nairobi', lat: -1.29, lon: 36.82 },
-    { name: 'Mexico City', lat: 19.43, lon: -99.13 },
-    { name: 'Toronto', lat: 43.65, lon: -79.38 },
-    { name: 'Buenos Aires', lat: -34.60, lon: -58.38 },
-    { name: 'Seoul', lat: 37.57, lon: 126.98 },
+    { name: 'Tel Aviv', code: 'TLV', lat: 32.08, lon: 34.78 },
+    { name: 'New York', code: 'JFK', lat: 40.71, lon: -74.01 },
+    { name: 'London', code: 'LHR', lat: 51.51, lon: -0.13 },
+    { name: 'Tokyo', code: 'HND', lat: 35.68, lon: 139.69 },
+    { name: 'Sydney', code: 'SYD', lat: -33.87, lon: 151.21 },
+    { name: 'São Paulo', code: 'GRU', lat: -23.55, lon: -46.63 },
+    { name: 'Cape Town', code: 'CPT', lat: -33.92, lon: 18.42 },
+    { name: 'Paris', code: 'CDG', lat: 48.86, lon: 2.35 },
+    { name: 'Dubai', code: 'DXB', lat: 25.20, lon: 55.27 },
+    { name: 'Singapore', code: 'SIN', lat: 1.35, lon: 103.82 },
+    { name: 'Los Angeles', code: 'LAX', lat: 34.05, lon: -118.24 },
+    { name: 'Moscow', code: 'SVO', lat: 55.76, lon: 37.62 },
+    { name: 'Mumbai', code: 'BOM', lat: 19.08, lon: 72.88 },
+    { name: 'Hong Kong', code: 'HKG', lat: 22.32, lon: 114.17 },
+    { name: 'Reykjavik', code: 'KEF', lat: 64.15, lon: -21.94 },
+    { name: 'Nairobi', code: 'NBO', lat: -1.29, lon: 36.82 },
+    { name: 'Mexico City', code: 'MEX', lat: 19.43, lon: -99.13 },
+    { name: 'Toronto', code: 'YYZ', lat: 43.65, lon: -79.38 },
+    { name: 'Buenos Aires', code: 'EZE', lat: -34.60, lon: -58.38 },
+    { name: 'Seoul', code: 'ICN', lat: 37.57, lon: 126.98 },
   ];
-  for (const c of CITIES) c.pos = latLonToVec3(c.lat, c.lon);
+
+  const labelsEl = document.getElementById('labels');
+  const hitboxes = [];
+  const hitGeo = new THREE.SphereGeometry(5, 8, 8);
+  const hitMat = new THREE.MeshBasicMaterial({ visible: false });
+  for (const c of CITIES) {
+    c.pos = latLonToVec3(c.lat, c.lon);
+    c.marker = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: DOT_TEX, color: 0xffffff, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    }));
+    c.marker.position.copy(latLonToVec3(c.lat, c.lon, R + 0.8));
+    c.marker.scale.setScalar(3);
+    globe.add(c.marker);
+
+    const hit = new THREE.Mesh(hitGeo, hitMat);
+    hit.position.copy(latLonToVec3(c.lat, c.lon, R + 2));
+    hit.userData.city = c;
+    globe.add(hit);
+    hitboxes.push(hit);
+
+    c.label = document.createElement('div');
+    c.label.className = 'city-label';
+    c.label.textContent = c.name.toUpperCase();
+    labelsEl.appendChild(c.label);
+  }
 
   // ---------- FLIGHTS ----------
   const COLORS = [0x3ff2ff, 0x3ff2ff, 0xff3fd2, 0xffb43f].map(c => new THREE.Color(c));
+  const SELECT_COLOR = new THREE.Color(0xff3fd2);
   const TRAIL = 0.28;           // trail length as a fraction of the arc
   const MAX_ACTIVE = MOBILE ? 18 : 32;
   const SPAWN_EVERY = 0.28;     // seconds
-  const DOT_TEX = dotTexture();
 
   const arcVertex = `
     varying float vT;
@@ -228,6 +377,7 @@
   const flights = [];
   const rings = [];
   const stats = { launched: 0 };
+  let selected = null;
 
   function arcCurve(a, b) {
     const ua = a.clone().normalize(), ub = b.clone().normalize();
@@ -244,12 +394,15 @@
     return { curve: new THREE.CatmullRomCurve3(pts), angle };
   }
 
-  function launchFlight(from, to) {
-    if (!to) {
-      do { to = CITIES[Math.floor(Math.random() * CITIES.length)]; } while (to === from);
-    }
+  function randomCity(except) {
+    let c;
+    do { c = CITIES[Math.floor(Math.random() * CITIES.length)]; } while (c === except);
+    return c;
+  }
+
+  function launchFlight(from, to = randomCity(from), color) {
     const { curve, angle } = arcCurve(from.pos, to.pos);
-    const color = COLORS[Math.floor(Math.random() * COLORS.length)];
+    color = color || COLORS[Math.floor(Math.random() * COLORS.length)];
     const material = new THREE.ShaderMaterial({
       vertexShader: arcVertex,
       fragmentShader: arcFragment,
@@ -263,9 +416,11 @@
       map: DOT_TEX, color, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
     }));
     head.scale.setScalar(5);
+    head.position.copy(from.pos);
     globe.add(tube, head);
     flights.push({ tube, head, curve, to, color, t: 0, duration: 1.6 + angle * 1.4, landed: false, fade: 1 });
     stats.launched++;
+    logFlight(from, to, color);
   }
 
   function spawnRing(city, color, scale = 1) {
@@ -277,7 +432,7 @@
     mesh.position.copy(normal).multiplyScalar(R + 0.6);
     mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
     globe.add(mesh);
-    rings.push({ mesh, age: 0, life: 1.4, maxScale: 7 * scale });
+    rings.push({ mesh, age: 0, life: 1.4 * scale, maxScale: 7 * scale });
   }
 
   function disposeObj(o) {
@@ -324,8 +479,92 @@
     spawnTimer += dt;
     if (spawnTimer < SPAWN_EVERY) return;
     spawnTimer = 0;
-    if (flights.length < MAX_ACTIVE) launchFlight(CITIES[Math.floor(Math.random() * CITIES.length)]);
+    if (flights.length >= MAX_ACTIVE) return;
+    if (selected && Math.random() < 0.4) launchFlight(selected, undefined, SELECT_COLOR);
+    else launchFlight(randomCity());
   }
+
+  // ---------- HUD ----------
+  const $ = id => document.getElementById(id);
+  const hud = { active: $('active'), total: $('total'), origin: $('origin'), clock: $('clock'), date: $('date'), log: $('log'), banner: $('banner') };
+  const hex = c => '#' + c.getHexString();
+
+  function logFlight(from, to, color) {
+    if (!hud.log) return;
+    const li = document.createElement('li');
+    li.innerHTML = `<b style="color:${hex(color)}">●</b> ${from.code} → ${to.code}`;
+    hud.log.prepend(li);
+    while (hud.log.children.length > (MOBILE ? 3 : 5)) hud.log.lastChild.remove();
+  }
+
+  function showBanner(text) {
+    hud.banner.textContent = text;
+    hud.banner.classList.remove('show');
+    void hud.banner.offsetWidth;
+    hud.banner.classList.add('show');
+  }
+
+  const pad = n => String(n).padStart(2, '0');
+  function updateClock() {
+    const d = new Date();
+    hud.clock.textContent = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+    hud.date.textContent = `${d.getUTCFullYear()}.${pad(d.getUTCMonth() + 1)}.${pad(d.getUTCDate())} // UTC`;
+  }
+  updateClock();
+  setInterval(updateClock, 1000);
+
+  let lastActive = -1, lastTotal = -1;
+  function updateHud() {
+    if (flights.length !== lastActive) hud.active.textContent = lastActive = flights.length;
+    if (stats.launched !== lastTotal) hud.total.textContent = (lastTotal = stats.launched).toLocaleString('en-US');
+  }
+
+  // City labels: project to screen, hide on the far side.
+  const tmpV = new THREE.Vector3(), camDir = new THREE.Vector3();
+  function updateLabels() {
+    const w = innerWidth, h = innerHeight;
+    for (const c of CITIES) {
+      camDir.copy(camera.position).sub(c.pos).normalize();
+      const facing = camDir.dot(c.pos.clone().normalize());
+      const visible = facing > 0.25;
+      if (!visible) { c.label.style.opacity = 0; continue; }
+      tmpV.copy(c.pos).project(camera);
+      const x = (tmpV.x + 1) / 2 * w, y = (1 - tmpV.y) / 2 * h;
+      c.label.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`;
+      c.label.style.opacity = Math.min(1, (facing - 0.25) * 3).toFixed(2);
+    }
+  }
+
+  // ---------- INTERACTION ----------
+  function selectCity(city) {
+    if (selected) { selected.marker.material.color.set(0xffffff); selected.label.classList.remove('selected'); }
+    selected = city;
+    city.marker.material.color.copy(SELECT_COLOR);
+    city.label.classList.add('selected');
+    hud.origin.textContent = `${city.code} · ${city.name.toUpperCase()}`;
+    hud.origin.classList.add('locked');
+    spawnRing(city, SELECT_COLOR, 2);
+    for (let i = 0; i < 8; i++) setTimeout(() => launchFlight(city, undefined, i % 2 ? SELECT_COLOR : COLORS[0]), i * 110);
+  }
+
+  const raycaster = new THREE.Raycaster();
+  const pointer = new THREE.Vector2();
+  let downX = 0, downY = 0;
+  canvas.addEventListener('pointerdown', e => { downX = e.clientX; downY = e.clientY; });
+  canvas.addEventListener('pointerup', e => {
+    if (Math.hypot(e.clientX - downX, e.clientY - downY) > 6) return;  // it was a drag
+    pointer.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+    raycaster.setFromCamera(pointer, camera);
+    const hit = raycaster.intersectObjects([...hitboxes, globe.children[0]], false)[0];
+    if (hit?.object.userData.city) selectCity(hit.object.userData.city);
+  });
+
+  $('chaos').addEventListener('click', () => {
+    showBanner('⚠ CHAOS MODE // 100 FLIGHTS');
+    document.body.classList.add('chaos');
+    setTimeout(() => document.body.classList.remove('chaos'), 2500);
+    for (let i = 0; i < 100; i++) setTimeout(() => launchFlight(randomCity()), i * 15);
+  });
 
   // ---------- LOOP ----------
   // Pre-warm so the globe opens with flights already in the air.
@@ -336,14 +575,21 @@
     camera.aspect = innerWidth / innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(innerWidth, innerHeight);
+    composer.setSize(innerWidth, innerHeight);
   });
 
+  let pulse = 0;
   renderer.setAnimationLoop(() => {
     const dt = Math.min(clock.getDelta(), 0.1);
+    pulse += dt;
     autoSpawn(dt);
     updateFlights(dt);
+    if (selected) selected.marker.scale.setScalar(4 + Math.sin(pulse * 6) * 1.5);
+    stars.rotation.y += dt * 0.005;
     controls.update();
-    renderer.render(scene, camera);
+    updateLabels();
+    updateHud();
+    composer.render();
   });
   </script>
 </body>
