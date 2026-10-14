@@ -43,6 +43,11 @@
     </div>
 
     <div class="bottom-right">
+      <label class="speed">
+        <span class="label">SIM SPEED</span>
+        <input id="speed" type="range" min="-2" max="2.3219" step="0.01" value="0" aria-label="Simulation speed">
+        <output id="speed-val">1.00×</output>
+      </label>
       <button id="chaos" type="button">⚠ CHAOS MODE</button>
       <div class="hint">DRAG · ZOOM · TAP A CITY</div>
     </div>
@@ -70,6 +75,7 @@
         <dt>GROUND SPEED</dt><dd id="fp-speed">--</dd>
         <dt>DEPARTED</dt><dd id="fp-dep">--</dd>
         <dt>EST. ARRIVAL</dt><dd id="fp-arr">--</dd>
+        <dt>TOUCHDOWN IN</dt><dd id="fp-touch">--</dd>
       </dl>
     </section>
   </div>
@@ -473,7 +479,9 @@
   const stats = { launched: 0 };
   let selected = null;
   let pulse = 0;
-  const TRACK_TIME_SCALE = 0.18;  // the followed flight runs at 18% speed
+  const FLIGHT_TIME = 3;          // base flight duration multiplier (3x slower than the original)
+  const TRACK_TIME_SCALE = 0.5;   // the followed flight runs at half speed
+  let simSpeed = 1;               // live multiplier from the HUD slider (0.25x - 5x)
   const tracking = { flight: null, mode: "free" };  // mode: free | follow | return
 
   function arcCurve(a, b) {
@@ -553,7 +561,7 @@
     const hit = new THREE.Mesh(flightHitGeo, hitMat);
     hit.position.copy(from.pos);
     globe.add(tube, head, hit);
-    const f = { tube, head, hit, curve, from, to, color, t: 0, duration: 1.6 + angle * 1.4, landed: false, fade: 1, info: flightInfo(from, to) };
+    const f = { tube, head, hit, curve, from, to, color, t: 0, duration: (1.6 + angle * 1.4) * FLIGHT_TIME, landed: false, fade: 1, info: flightInfo(from, to) };
     hit.userData.flight = f;
     flights.push(f);
     stats.launched++;
@@ -583,7 +591,7 @@
       const f = flights[i];
       const tracked = f === tracking.flight;
       // The tracked flight slows down so it can be followed and read.
-      f.t += dt / f.duration * (tracked ? TRACK_TIME_SCALE : 1);
+      f.t += dt * simSpeed / f.duration * (tracked ? TRACK_TIME_SCALE : 1);
       const p = Math.min(f.t, tracked ? 1 : Infinity);
       f.tube.material.uniforms.uProgress.value = p;
       if (p < 1) {
@@ -597,7 +605,7 @@
         spawnRing(f.to, f.color, tracked ? 1.6 : 1);
       }
       if (tracked) {
-        f.head.scale.setScalar(8 + Math.sin(pulse * 8) * 2);
+        f.head.scale.setScalar(4.5 + Math.sin(pulse * 8) * 1);
         continue;  // never fade out while its popup is open
       }
       if (f.t > 1 + TRAIL) {
@@ -623,7 +631,7 @@
 
   let spawnTimer = 0;
   function autoSpawn(dt) {
-    spawnTimer += dt;
+    spawnTimer += dt * simSpeed;
     if (spawnTimer < SPAWN_EVERY) return;
     spawnTimer = 0;
     if (flights.length >= MAX_ACTIVE) return;
@@ -699,7 +707,7 @@
     el: $('flight-popup'), number: $('fp-number'), airline: $('fp-airline'),
     fromCode: $('fp-from-code'), fromName: $('fp-from-name'), toCode: $('fp-to-code'), toName: $('fp-to-name'),
     status: $('fp-status'), km: $('fp-km'), alt: $('fp-alt'), speed: $('fp-speed'),
-    dep: $('fp-dep'), arr: $('fp-arr'), left: $('fp-left'), bar: $('fp-bar'), pct: $('fp-pct'),
+    dep: $('fp-dep'), arr: $('fp-arr'), left: $('fp-left'), bar: $('fp-bar'), pct: $('fp-pct'), touch: $('fp-touch'),
   };
   const hhmm = d => `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
   const fmtDuration = h => `${Math.floor(h)}H ${pad(Math.round((h % 1) * 60) % 60)}M`;
@@ -709,7 +717,8 @@
     tracking.flight = f;
     tracking.mode = 'follow';
     f.tube.material.uniforms.uHi.value = 1;
-    f.head.material.color.set(0xffffff);
+    f.head.material.color.set(0xffffff).lerp(f.color, 0.35);
+    f.head.material.opacity = 0.85;
     controls.enabled = false;
     controls.autoRotate = false;
     clearTimeout(idleTimer);
@@ -737,6 +746,7 @@
     if (!f) return;
     f.tube.material.uniforms.uHi.value = 0;
     f.head.material.color.copy(f.color);
+    f.head.material.opacity = 1;
     f.head.scale.setScalar(6);
     if (f.landed) f.head.visible = false;
     tracking.flight = null;
@@ -756,6 +766,9 @@
     popup.alt.textContent = landed ? '0 FT' : Math.round(info.cruiseFt * phase / 100) * 100 + ' FT';
     popup.speed.textContent = landed ? '0 KM/H' : Math.round(260 + (info.cruiseKmh - 260) * phase) + ' KM/H';
     popup.left.textContent = landed ? '—' : fmtDuration(info.hours * (1 - p));
+    // Real seconds until landing at the current sim speed.
+    const secs = (1 - p) * f.duration / (simSpeed * TRACK_TIME_SCALE);
+    popup.touch.textContent = landed ? 'ARRIVED' : secs >= 60 ? `${Math.floor(secs / 60)}M ${pad(Math.floor(secs % 60))}S` : `${Math.ceil(secs)} S`;
     popup.bar.style.width = (p * 100).toFixed(1) + '%';
     popup.pct.textContent = Math.floor(p * 100) + '%';
     const status = landed ? 'LANDED' : p < 0.12 ? 'CLIMBING' : p > 0.88 ? 'DESCENDING' : 'EN ROUTE';
@@ -778,9 +791,10 @@
       upDir.copy(f.head.position).normalize();
       f.curve.getTangentAt(p, fwdDir);
       sideDir.crossVectors(fwdDir, upDir).normalize();
-      // Above and off to the side, slightly behind: the trail stays clear of the lens.
+      // Mostly above, a little to the side: the trail stays clear of the lens.
       const s = MOBILE ? 1.35 : 1;
-      desiredPos.copy(f.head.position).addScaledVector(upDir, 75 * s).addScaledVector(sideDir, 45 * s).addScaledVector(fwdDir, -25 * s);
+      const lift = f.landed ? 1.35 : 1;  // pull back once it has landed
+      desiredPos.copy(f.head.position).addScaledVector(upDir, 90 * s * lift).addScaledVector(sideDir, 32 * s).addScaledVector(fwdDir, -10 * s);
       followTarget.lerp(f.head.position, Math.min(1, k * 2));
     } else {
       desiredPos.copy(camera.position).normalize().multiplyScalar(fitDistance());
@@ -835,6 +849,17 @@
   $('fp-close').addEventListener('click', closeTracking);
   addEventListener('keydown', e => { if (e.key === 'Escape') closeTracking(); });
 
+  // Logarithmic speed slider: 2^-2 = 0.25x ... 2^2.32 = 5x. Double-click resets to 1x.
+  const speedInput = $('speed'), speedVal = $('speed-val');
+  function setSpeed(v) {
+    if (Math.abs(v) < 0.08) v = 0;  // snap to 1x near the middle
+    speedInput.value = v;
+    simSpeed = 2 ** v;
+    speedVal.textContent = simSpeed.toFixed(2) + '×';
+  }
+  speedInput.addEventListener('input', () => setSpeed(+speedInput.value));
+  speedInput.addEventListener('dblclick', () => setSpeed(0));
+
   $('chaos').addEventListener('click', () => {
     showBanner('⚠ CHAOS MODE // 100 FLIGHTS');
     document.body.classList.add('chaos');
@@ -844,7 +869,7 @@
 
   // ---------- LOOP ----------
   // Pre-warm so the globe opens with flights already in the air.
-  for (let i = 0; i < 150; i++) { autoSpawn(1 / 30); updateFlights(1 / 30); }
+  for (let i = 0; i < 450; i++) { autoSpawn(1 / 30); updateFlights(1 / 30); }
 
   const clock = new THREE.Clock();
   addEventListener('resize', () => {
